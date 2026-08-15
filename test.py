@@ -5,7 +5,6 @@ import subprocess
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
 from PIL import Image
 
 # ---------------------------------------------------------
@@ -20,87 +19,82 @@ dossier_sortie_png = f"img/calques_png/{session_id}"
 dossier_sortie_svg = f"img/vectorized/{session_id}"
 chemin_sortie_svg = os.path.join(dossier_sortie_svg, "logo_final.svg")
 
-TAILLE_GRAIN_MIN = 30      # Filtre anti-bruit local (en pixels²)
-SURFACE_CALQUE_MIN = 200  # Surface minimale globale pour conserver un calque PNG (en pixels²)
-PADDING = 50               # Marge de sécurité autour de l'image (en pixels)
+# 🚀 DEMANDE DU NOMBRE DE COULEURS À L'UTILISATEUR
+print("--- CONFIGURATION DU TRAITEMENT ---")
+saisie_utilisateur = input("Combien de couleurs comporte votre logo ? (ex: 4) : ")
+
+try:
+    NB_COULEURS_CLIENT = int(saisie_utilisateur)
+    if NB_COULEURS_CLIENT < 1:
+        print("⚠️ Nombre invalide. Valeur par défaut appliquée : 4 couleurs.")
+        NB_COULEURS_CLIENT = 4
+except ValueError:
+    print("⚠️ Entrée non numérique. Valeur par défaut appliquée : 4 couleurs.")
+    NB_COULEURS_CLIENT = 4
+
+# Facteur d'échelle & réglages anti-bruit
+FACTEUR_ECHELLE = 4                                 # Agrandissement 4x standard
+TAILLE_GRAIN_MIN = 50 * (FACTEUR_ECHELLE ** 2)      # Filtre anti-bruit local (pixels²)
+SURFACE_CALQUE_MIN = 300 * (FACTEUR_ECHELLE ** 2)  # Surface minimale globale (pixels²)
+PADDING = 50 * FACTEUR_ECHELLE                      # Marge de sécurité (pixels)
 
 # 🎯 PARAMÈTRES POTRACE
 POTRACE_ALPHACORNER = 1.33
 POTRACE_OPTTOLERANCE = 0.4
-POTRACE_TURDSIZE = 5
+POTRACE_TURDSIZE = 10
 
 os.makedirs(dossier_sortie_png, exist_ok=True)
 os.makedirs(dossier_sortie_svg, exist_ok=True)
 
-print(f"🔑 Session ID unique généré : {session_id}")
+print(f"\n🔑 Session ID unique généré : {session_id}")
 
 # ---------------------------------------------------------
-# 1. CHARGEMENT, PADDING ET DÉTECTION DU NOMBRE DE COULEURS
+# 1. CHARGEMENT, UPSCALING STANDARD ET PADDING
 # ---------------------------------------------------------
-image = cv2.imread(chemin_entree, cv2.IMREAD_UNCHANGED)
+image_brute = cv2.imread(chemin_entree, cv2.IMREAD_UNCHANGED)
 
-if image is None:
+if image_brute is None:
     print(f"Erreur : Impossible de charger l'image {chemin_entree}")
     exit()
 
 # Séparation BGR et Alpha
-if len(image.shape) == 3 and image.shape[2] == 4:
-    b, g, r, alpha = cv2.split(image)
-    img_bgr = cv2.merge([b, g, r])
+if len(image_brute.shape) == 3 and image_brute.shape[2] == 4:
+    b, g, r, alpha_brut = cv2.split(image_brute)
+    img_bgr_brut = cv2.merge([b, g, r])
 else:
-    img_bgr = image
-    hauteur_init, largeur_init = image.shape[:2]
-    alpha = np.ones((hauteur_init, largeur_init), dtype=np.uint8) * 255
+    img_bgr_brut = image_brute
+    h_init, w_init = image_brute.shape[:2]
+    alpha_brut = np.ones((h_init, w_init), dtype=np.uint8) * 255
 
-# ➕ AJOUT DU PADDING DE 50PX (Bordure transparente / vide)
+h_orig, w_orig = img_bgr_brut.shape[:2]
+
+# Upscaling standard avec interpolation Lanczos
+nouvelle_largeur = w_orig * FACTEUR_ECHELLE
+nouvelle_hauteur = h_orig * FACTEUR_ECHELLE
+
+img_bgr_4x = cv2.resize(img_bgr_brut, (nouvelle_largeur, nouvelle_hauteur), interpolation=cv2.INTER_LANCZOS4)
+alpha_4x = cv2.resize(alpha_brut, (nouvelle_largeur, nouvelle_hauteur), interpolation=cv2.INTER_LANCZOS4)
+_, alpha_4x = cv2.threshold(alpha_4x, 127, 255, cv2.THRESH_BINARY)
+
+print(f"📈 Image agrandie (Lanczos) : {w_orig}x{h_orig} px ➡️ {nouvelle_largeur}x{nouvelle_hauteur} px")
+
+# Ajout du padding de sécurité
 img_bgr = cv2.copyMakeBorder(
-    img_bgr, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=[0, 0, 0]
+    img_bgr_4x, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=[0, 0, 0]
 )
 alpha = cv2.copyMakeBorder(
-    alpha, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=0
+    alpha_4x, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=0
 )
 
-# Mise à jour des dimensions avec le padding
 hauteur, largeur = img_bgr.shape[:2]
-
 masque_visible = alpha > 0
 pixels_visibles = img_bgr[masque_visible]
 
-# --- 💡 DÉTECTION HYBRIDE DE COULEURS ---
-img_filtree = cv2.bilateralFilter(img_bgr, d=5, sigmaColor=50, sigmaSpace=50)
-pixels_propres = img_filtree[masque_visible]
+# --- 💡 CLUSTERING SELON LE NOMBRE DE COULEURS DEMANDÉ ---
+NB_COULEURS = NB_COULEURS_CLIENT
+print(f"🎯 Traitement configuré pour exactement {NB_COULEURS} couleur(s).")
 
-couleurs_uniques = np.unique(pixels_propres, axis=0)
-nb_couleurs_uniques = len(couleurs_uniques)
-
-SEUIL_MAX_APLATS = 16  # Au-delà, dégradé/bruit supposé
-
-if nb_couleurs_uniques <= SEUIL_MAX_APLATS:
-    NB_COULEURS = nb_couleurs_uniques
-    print(f"🎨 [Mode Aplats] {NB_COULEURS} couleurs pures détectées.")
-else:
-    print(f"🔍 [Mode Complexe/Dégradé] {nb_couleurs_uniques} nuances détectées. Recherche du K optimal...")
-    
-    taille_echantillon = min(2000, len(pixels_visibles))
-    indices = np.random.choice(len(pixels_visibles), size=taille_echantillon, replace=False)
-    pixels_sample = pixels_visibles[indices]
-
-    meilleur_k = 2
-    meilleur_score = -1
-
-    for k in range(2, SEUIL_MAX_APLATS + 1):
-        km_test = KMeans(n_clusters=k, random_state=42, n_init=3).fit(pixels_sample)
-        if len(set(km_test.labels_)) < 2:
-            continue
-        score = silhouette_score(pixels_sample, km_test.labels_)
-        if score > meilleur_score:
-            meilleur_score = score
-            meilleur_k = k
-
-    NB_COULEURS = meilleur_k
-    print(f"🎯 Nombre de couleurs optimal identifié : {NB_COULEURS} (Silhouette: {meilleur_score:.2f})")
-
-# Clustering K-Means final
+# Clustering K-Means
 kmeans = KMeans(n_clusters=NB_COULEURS, random_state=42, n_init=10).fit(pixels_visibles)
 couleurs = np.uint8(kmeans.cluster_centers_)
 
@@ -109,7 +103,7 @@ labels_tous = kmeans.predict(pixels_tous)
 labels_matrice = labels_tous.reshape(hauteur, largeur)
 
 # ---------------------------------------------------------
-# 2. GÉNÉRATION ET FILTRAGE INITIAL DES CALQUES PNG
+# 2. GÉNÉRATION ET FILTRAGE DES CALQUES PNG
 # ---------------------------------------------------------
 print("\n📸 ÉTAPE 1 : Génération et filtrage des calques PNG...")
 
@@ -119,30 +113,30 @@ kernel_dilatation = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 for i in range(NB_COULEURS):
     couleur_b, couleur_g, couleur_r = couleurs[i]
 
-    # Ignore le blanc / quasi-blanc
+    # Ignorer le fond blanc / quasi-blanc
     if couleur_r > 245 and couleur_g > 245 and couleur_b > 245:
         continue
 
-    masque_couleur = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
-    
-    # Suppression du bruit isolé local
-    nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_couleur)
-    masque_sans_bruit = np.zeros_like(masque_couleur)
-    
-    for obj_i in range(1, nb_labels):
-        if stats[obj_i, cv2.CC_STAT_AREA] >= TAILLE_GRAIN_MIN:
-            masque_sans_bruit[labels_obj == obj_i] = 255
+    masque_brut = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
 
-    # 🛑 FILTRE DE PRÉ-GÉNÉRATION : Si la surface globale est trop petite, on ne crée même pas le fichier
-    if np.count_nonzero(masque_sans_bruit) < SURFACE_CALQUE_MIN:
-        print(f"  └─ ⚠️ Calque {i+1} ignoré (surface totale trop faible).")
-        continue
-
-    # Nettoyage & lissage des bords
-    masque_propre = cv2.morphologyEx(masque_sans_bruit, cv2.MORPH_CLOSE, kernel_fermeture)
+    masque_propre = cv2.morphologyEx(masque_brut, cv2.MORPH_CLOSE, kernel_fermeture)
     masque_flou = cv2.GaussianBlur(masque_propre, (5, 5), 0)
     _, masque_lisse = cv2.threshold(masque_flou, 127, 255, cv2.THRESH_BINARY)
-    masque_final = cv2.dilate(masque_lisse, kernel_dilatation, iterations=1)
+    masque_dilate = cv2.dilate(masque_lisse, kernel_dilatation, iterations=1)
+
+    # Filtrage des isolats de bruit (placé après dilatation)
+    nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_dilate)
+    masque_final = np.zeros_like(masque_dilate)
+
+    for obj_i in range(1, nb_labels):
+        if stats[obj_i, cv2.CC_STAT_AREA] >= TAILLE_GRAIN_MIN:
+            masque_final[labels_obj == obj_i] = 255
+
+    surface_reelle = np.count_nonzero(masque_final)
+
+    if surface_reelle < SURFACE_CALQUE_MIN:
+        print(f"  └─ ⚠️ Calque {i+1} ignoré (surface trop faible: {surface_reelle}px²).")
+        continue
 
     calque_png = np.zeros((hauteur, largeur, 4), dtype=np.uint8)
     pixels_valides = masque_final > 0
@@ -153,12 +147,12 @@ for i in range(NB_COULEURS):
     chemin_sauvegarde = os.path.join(dossier_sortie_png, f"calque_{i+1}_#{code_hex}.png")
 
     cv2.imwrite(chemin_sauvegarde, calque_png)
-    print(f"  └─ Calque {i+1} enregistré : '{chemin_sauvegarde}'")
+    print(f"  └─ Calque {i+1} enregistré : '{chemin_sauvegarde}' (Surface: {surface_reelle}px²)")
 
 # ---------------------------------------------------------
-# 3. RE-INSPECTION, NETTOYAGE DU BRUIT ET TRI PAR SURFACE
+# 3. TRI PAR SURFACE
 # ---------------------------------------------------------
-print("\n🧹 ÉTAPE 2 : Inspection des PNG créés et suppression du bruit...")
+print("\n🧹 ÉTAPE 2 : Tri des calques...")
 
 fichiers_png = [f for f in os.listdir(dossier_sortie_png) if f.endswith(".png") and "#" in f]
 donnees_calques = []
@@ -172,39 +166,27 @@ for fichier in fichiers_png:
 
     alpha_calque = calque_img[:, :, 3]
     masque_binaire = np.uint8(alpha_calque > 0) * 255
-    surface_totale = np.count_nonzero(masque_binaire)
-
-    # 🗑️ POST-INSPECTION : Si le calque PNG enregistré s'avère être du bruit
-    if surface_totale < SURFACE_CALQUE_MIN:
-        print(f"  └─ 🗑️ Suppression du fichier bruit : {fichier} (Surface: {surface_totale}px²)")
-        os.remove(chemin_calque)
-        continue
 
     donnees_calques.append({
         "fichier": fichier,
         "hex": "#" + fichier.split("#")[1].split(".")[0],
-        "surface": surface_totale,
+        "surface": np.count_nonzero(masque_binaire),
         "masque": masque_binaire,
     })
 
-# Tri par surface décroissante
 donnees_calques.sort(key=lambda x: x["surface"], reverse=True)
 
 # ---------------------------------------------------------
-# 4. VECTORISATION HAUTE DÉFINITION LISSE
+# 4. VECTORISATION
 # ---------------------------------------------------------
-print("\n🖊️ ÉTAPE 3 : Vectorisation Potrace Lisse...")
+print("\n🖊️ ÉTAPE 3 : Vectorisation Potrace...")
 
 def masque_vers_path_svg_hd(masque_binaire, dossier_tmp):
     tmp_id = uuid.uuid4().hex[:6]
     chemin_pbm = os.path.join(dossier_tmp, f"_tmp_{tmp_id}.pbm")
     chemin_svg = os.path.join(dossier_tmp, f"_tmp_{tmp_id}.svg")
 
-    masque_hd = cv2.resize(masque_binaire, (largeur * 2, hauteur * 2), interpolation=cv2.INTER_LINEAR)
-    masque_hd = cv2.GaussianBlur(masque_hd, (3, 3), 0)
-    _, masque_hd = cv2.threshold(masque_hd, 127, 255, cv2.THRESH_BINARY)
-
-    Image.fromarray(255 - masque_hd).convert("1").save(chemin_pbm)
+    Image.fromarray(255 - masque_binaire).convert("1").save(chemin_pbm)
 
     cmd = [
         "potrace",
@@ -246,20 +228,19 @@ for calque in donnees_calques:
         continue
 
     lignes_svg.append(
-        f'  <g transform="translate(0,{hauteur}) scale(0.05,-0.05)">'
+        f'  <g transform="translate(0,{hauteur}) scale(0.1,-0.1)">'
         f'<path d="{d_path}" fill="{code_hex}" fill-rule="evenodd" '
         f'stroke="{code_hex}" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round" /></g>'
     )
-    print(f"  └─ ✅ Vectorisé avec courbes lisses : '{fichier}'")
+    print(f"  └─ ✅ Vectorisé : '{fichier}'")
 
 lignes_svg.append("</svg>")
 
 # ---------------------------------------------------------
-# 5. SAUVEGARDE DU FICHIER FINAL
+# 5. SAUVEGARDE
 # ---------------------------------------------------------
 with open(chemin_sortie_svg, "w") as f:
     f.write("\n".join(lignes_svg))
 
 print(f"\n🎉 Vectorisation finale terminée avec succès !")
-print(f" 📂 PNG validés : {dossier_sortie_png}")
-print(f" 📄 SVG : {chemin_sortie_svg}")
+print(f" 📄 SVG disponible ici : {chemin_sortie_svg}")
