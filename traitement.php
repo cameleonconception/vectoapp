@@ -1,10 +1,19 @@
 <?php
+// 🚀 SUPPRESSION DE LA LIMITE DE TEMPS D'EXÉCUTION PHP (Permet les traitements longs)
+set_time_limit(0);
+ini_set('max_execution_time', 0);
+
+// ---------------------------------------------------------
+// CONFIGURATION DES CHEMINS ABSOLUS (PORTABLE LINUX / WINDOWS)
+// ---------------------------------------------------------
+$base_dir = __DIR__;
+$dossier_reception = $base_dir . DIRECTORY_SEPARATOR . "img" . DIRECTORY_SEPARATOR . "toBeVectorized" . DIRECTORY_SEPARATOR;
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image'])) {
     
     $nombre_couleurs = intval($_POST['couleurs']);
     $fichier = $_FILES['image'];
     
-    $dossier_reception = "img/toBeVectorized/";
     if (!is_dir($dossier_reception)) {
         mkdir($dossier_reception, 0777, true);
     }
@@ -14,25 +23,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image'])) {
     
     if (move_uploaded_file($fichier['tmp_name'], $chemin_destination)) {
         
-        // Exécution de Python en capturant aussi les erreurs système (2>&1)
-        $commande = "python vectoapp.py " . escapeshellarg($nom_fichier) . " " . escapeshellarg($nombre_couleurs) . " 2>&1";
-        $output = shell_exec($commande);
+        $chemin_script_python = $base_dir . DIRECTORY_SEPARATOR . "vectoapp.py";
         
-        // Recherche du fichier SVG généré dans le dossier img/vectorized/
-        $nom_svg_attendu = pathinfo($nom_fichier, PATHINFO_FILENAME) . "_vectorise.svg";
-        
-        // Recherche récursive dans les sous-dossiers de session
-        $fichiers_trouves = glob("img/vectorized/*/" . $nom_svg_attendu);
-        
-        if (!empty($fichiers_trouves) && file_exists($fichiers_trouves[0])) {
-            $chemin_svg = $fichiers_trouves[0];
-            echo "<div>" . file_get_contents($chemin_svg) . "</div>";
+        // Détection automatique du système d'exploitation
+        if (PHP_OS_FAMILY === 'Windows') {
+            $commande = "python " . escapeshellarg($chemin_script_python) . " " . escapeshellarg($nom_fichier) . " " . escapeshellarg($nombre_couleurs) . " 2>&1";
         } else {
-            echo "❌ Erreur lors de la génération du fichier SVG.<br>";
-            echo "<strong>Détail de la console :</strong><pre>$output</pre>";
+            $commande = "export LC_ALL=C.UTF-8; python3 " . escapeshellarg($chemin_script_python) . " " . escapeshellarg($nom_fichier) . " " . escapeshellarg($nombre_couleurs) . " 2>&1";
+        }
+        
+        // Exécution de la commande
+        $chemin_svg_genere = trim(shell_exec($commande));
+        
+        // Vérification et renvoi du SVG
+        if (!empty($chemin_svg_genere) && file_exists($chemin_svg_genere)) {
+            echo file_get_contents($chemin_svg_genere);
+            exit();
+        } else {
+            http_response_code(500);
+            echo "Erreur lors de la génération. Console : " . $chemin_svg_genere;
+            exit();
         }
     } else {
-        echo "❌ Échec du téléversement de l'image.";
+        http_response_code(500);
+        echo "Erreur : Impossible de déplacer le fichier téléversé.";
+        exit();
     }
 }
 ?>
