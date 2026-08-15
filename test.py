@@ -5,6 +5,7 @@ import subprocess
 import cv2
 import numpy as np
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from PIL import Image
 
 # ---------------------------------------------------------
@@ -19,13 +20,12 @@ dossier_sortie_png = f"img/calques_png/{session_id}"
 dossier_sortie_svg = f"img/vectorized/{session_id}"
 chemin_sortie_svg = os.path.join(dossier_sortie_svg, "logo_final.svg")
 
-NB_COULEURS = 6
 TAILLE_GRAIN_MIN = 30  # Filtre anti-bruit (en pixels²)
 
-# 🎯 PARAMÈTRES POTRACE AJUSTÉS POUR CORRIGER LES POINTES
-POTRACE_ALPHACORNER = 1.33  # > 1.0 = Force des courbes ultra-lisses et élimine les angles inutiles
-POTRACE_OPTTOLERANCE = 0.4  # Tolérance accrue pour fusionner les segments hachés
-POTRACE_TURDSIZE = 5        # Élimine davantage le micro-bruit de bordure
+# 🎯 PARAMÈTRES POTRACE
+POTRACE_ALPHACORNER = 1.33
+POTRACE_OPTTOLERANCE = 0.4
+POTRACE_TURDSIZE = 5
 
 os.makedirs(dossier_sortie_png, exist_ok=True)
 os.makedirs(dossier_sortie_svg, exist_ok=True)
@@ -33,7 +33,7 @@ os.makedirs(dossier_sortie_svg, exist_ok=True)
 print(f"🔑 Session ID unique généré : {session_id}")
 
 # ---------------------------------------------------------
-# 1. CHARGEMENT ET DÉCOUPAGE EN CALQUES PNG
+# 1. CHARGEMENT ET DÉTECTION AUTOMATIQUE DU NOMBRE DE COULEURS
 # ---------------------------------------------------------
 image = cv2.imread(chemin_entree, cv2.IMREAD_UNCHANGED)
 
@@ -53,6 +53,46 @@ else:
 masque_visible = alpha > 0
 pixels_visibles = img_bgr[masque_visible]
 
+# --- 💡 DÉTECTION HYBRIDE DE COULEURS ---
+# Étape A : Nettoyage léger pour éliminer le micro-bruit
+img_filtree = cv2.bilateralFilter(img_bgr, d=5, sigmaColor=50, sigmaSpace=50)
+pixels_propres = img_filtree[masque_visible]
+
+# Étape B : Comptage des couleurs pures (Option 1)
+couleurs_uniques = np.unique(pixels_propres, axis=0)
+nb_couleurs_uniques = len(couleurs_uniques)
+
+SEUIL_MAX_APLATS = 16  # Au-delà de ce chiffre, on considère qu'il y a un dégradé/bruit
+
+if nb_couleurs_uniques <= SEUIL_MAX_APLATS:
+    NB_COULEURS = nb_couleurs_uniques
+    print(f"🎨 [Mode Aplats] {NB_COULEURS} couleurs pures détectées.")
+else:
+    print(f"🔍 [Mode Complexe/Dégradé] {nb_couleurs_uniques} nuances détectées. Recherche du meilleur K via Silhouette...")
+    
+    # Sous-échantillonnage rapide pour le calcul de Silhouette (Option 2)
+    taille_echantillon = min(2000, len(pixels_visibles))
+    indices = np.random.choice(len(pixels_visibles), size=taille_echantillon, replace=False)
+    pixels_sample = pixels_visibles[indices]
+
+    meilleur_k = 2
+    meilleur_score = -1
+
+    for k in range(2, SEUIL_MAX_APLATS + 1):
+        km_test = KMeans(n_clusters=k, random_state=42, n_init=3).fit(pixels_sample)
+        # Évite les cas où k est trop grand pour l'échantillon
+        if len(set(km_test.labels_)) < 2:
+            continue
+        score = silhouette_score(pixels_sample, km_test.labels_)
+        
+        if score > meilleur_score:
+            meilleur_score = score
+            meilleur_k = k
+
+    NB_COULEURS = meilleur_k
+    print(f"🎯 Nombre de couleurs optimal identifié : {NB_COULEURS} (Score Silhouette: {meilleur_score:.2f})")
+
+# Clustering K-Means final
 kmeans = KMeans(n_clusters=NB_COULEURS, random_state=42, n_init=10).fit(pixels_visibles)
 couleurs = np.uint8(kmeans.cluster_centers_)
 
@@ -60,6 +100,9 @@ pixels_tous = img_bgr.reshape(-1, 3)
 labels_tous = kmeans.predict(pixels_tous)
 labels_matrice = labels_tous.reshape(hauteur, largeur)
 
+# ---------------------------------------------------------
+# 2. GÉNÉRATION ET FILTRAGE DES CALQUES PNG
+# ---------------------------------------------------------
 print("\n📸 ÉTAPE 1 : Génération et filtrage des calques PNG...")
 
 kernel_fermeture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -68,12 +111,13 @@ kernel_dilatation = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 for i in range(NB_COULEURS):
     couleur_b, couleur_g, couleur_r = couleurs[i]
 
+    # Ignore le blanc / quasi-blanc
     if couleur_r > 245 and couleur_g > 245 and couleur_b > 245:
         continue
 
     masque_couleur = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
     
-    # Suppression du bruit isolé via composantes connexes
+    # Suppression du bruit isolé
     nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_couleur)
     masque_sans_bruit = np.zeros_like(masque_couleur)
     
@@ -84,7 +128,7 @@ for i in range(NB_COULEURS):
     if np.count_nonzero(masque_sans_bruit) == 0:
         continue
 
-    # 🧼 NETTOYAGE & LISSAGE DES BORDS (Aplatissement des pointes)
+    # Nettoyage & lissage des bords
     masque_propre = cv2.morphologyEx(masque_sans_bruit, cv2.MORPH_CLOSE, kernel_fermeture)
     masque_flou = cv2.GaussianBlur(masque_propre, (5, 5), 0)
     _, masque_lisse = cv2.threshold(masque_flou, 127, 255, cv2.THRESH_BINARY)
@@ -102,7 +146,7 @@ for i in range(NB_COULEURS):
     print(f"  └─ Calque {i+1} nettoyé enregistré : '{chemin_sauvegarde}'")
 
 # ---------------------------------------------------------
-# 2. TRI PAR SURFACE DÉCROISSANTE
+# 3. TRI PAR SURFACE DÉCROISSANTE
 # ---------------------------------------------------------
 print("\n✒️ ÉTAPE 2 : Tri par surface...")
 
@@ -129,7 +173,7 @@ for fichier in fichiers_png:
 donnees_calques.sort(key=lambda x: x["surface"], reverse=True)
 
 # ---------------------------------------------------------
-# 3. VECTORISATION HAUTE DÉFINITION LISSE
+# 4. VECTORISATION HAUTE DÉFINITION LISSE
 # ---------------------------------------------------------
 print("\n🖊️ ÉTAPE 3 : Vectorisation Potrace Lisse...")
 
@@ -138,7 +182,6 @@ def masque_vers_path_svg_hd(masque_binaire, dossier_tmp):
     chemin_pbm = os.path.join(dossier_tmp, f"_tmp_{tmp_id}.pbm")
     chemin_svg = os.path.join(dossier_tmp, f"_tmp_{tmp_id}.svg")
 
-    # 🚀 UPSCALING ET LISSAGE : Utilisation d'un redimensionnement Bilinéaire + Flou anti-crénelage
     masque_hd = cv2.resize(masque_binaire, (largeur * 2, hauteur * 2), interpolation=cv2.INTER_LINEAR)
     masque_hd = cv2.GaussianBlur(masque_hd, (3, 3), 0)
     _, masque_hd = cv2.threshold(masque_hd, 127, 255, cv2.THRESH_BINARY)
@@ -197,7 +240,7 @@ for calque in donnees_calques:
 lignes_svg.append("</svg>")
 
 # ---------------------------------------------------------
-# 4. SAUVEGARDE DU FICHIER FINAL
+# 5. SAUVEGARDE DU FICHIER FINAL
 # ---------------------------------------------------------
 with open(chemin_sortie_svg, "w") as f:
     f.write("\n".join(lignes_svg))
