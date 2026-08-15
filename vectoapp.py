@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import uuid
 import subprocess
@@ -12,29 +13,31 @@ from PIL import Image
 # ---------------------------------------------------------
 session_id = uuid.uuid4().hex[:8]
 
-# 🚀 DEMANDE DES INFORMATIONS À L'UTILISATEUR
-print("--- CONFIGURATION DU TRAITEMENT ---")
+# 🚀 RÉCUPÉRATION DES ARGUMENTS PASSÉS PAR PHP OU TERMINAL
+if len(sys.argv) >= 3:
+    imgName = sys.argv[1]                 # Exemple : "logo.png"
+    try:
+        NB_COULEURS_CLIENT = int(sys.argv[2]) # Exemple : 4
+    except ValueError:
+        NB_COULEURS_CLIENT = 4
+else:
+    # Mode secours si exécuté sans arguments dans le terminal
+    imgName = input("Entrez le nom du fichier à vectoriser (ex: logo.png) : ").strip()
+    saisie_couleurs = input("Combien de couleurs comporte votre logo ? (ex: 4) : ").strip()
+    try:
+        NB_COULEURS_CLIENT = int(saisie_couleurs)
+    except ValueError:
+        NB_COULEURS_CLIENT = 4
 
-# 1. Demande du nom de fichier
-imgName = input("Entrez le nom du fichier à vectoriser (ex: logo.png) : ").strip()
+if NB_COULEURS_CLIENT < 1:
+    NB_COULEURS_CLIENT = 4
+
 chemin_entree = f"img/toBeVectorized/{imgName}"
 
 # Vérification de l'existence du fichier
 if not os.path.exists(chemin_entree):
-    print(f"❌ Erreur : Le fichier '{chemin_entree}' n'existe pas. Veuillez le placer dans le dossier 'img/toBeVectorized/'.")
-    exit()
-
-# 2. Demande du nombre de couleurs
-saisie_couleurs = input("Combien de couleurs comporte votre logo ? (ex: 4) : ").strip()
-
-try:
-    NB_COULEURS_CLIENT = int(saisie_couleurs)
-    if NB_COULEURS_CLIENT < 1:
-        print("⚠️ Nombre invalide. Valeur par défaut appliquée : 4 couleurs.")
-        NB_COULEURS_CLIENT = 4
-except ValueError:
-    print("⚠️ Entrée non numérique. Valeur par défaut appliquée : 4 couleurs.")
-    NB_COULEURS_CLIENT = 4
+    print(f"❌ Erreur : Le fichier '{chemin_entree}' n'existe pas.")
+    exit(1)
 
 dossier_sortie_png = f"img/calques_png/{session_id}"
 dossier_sortie_svg = f"img/vectorized/{session_id}"
@@ -54,8 +57,6 @@ POTRACE_TURDSIZE = 10
 os.makedirs(dossier_sortie_png, exist_ok=True)
 os.makedirs(dossier_sortie_svg, exist_ok=True)
 
-print(f"\n🔑 Session ID unique généré : {session_id}")
-
 # ---------------------------------------------------------
 # 1. CHARGEMENT, UPSCALING ET ROGNAGE AUTOMATIQUE (CROP)
 # ---------------------------------------------------------
@@ -63,7 +64,7 @@ image_brute = cv2.imread(chemin_entree, cv2.IMREAD_UNCHANGED)
 
 if image_brute is None:
     print(f"Erreur : Impossible de charger l'image {chemin_entree}")
-    exit()
+    exit(1)
 
 # Séparation BGR et Alpha
 if len(image_brute.shape) == 3 and image_brute.shape[2] == 4:
@@ -91,10 +92,8 @@ if len(ys) > 0 and len(xs) > 0:
     min_y, max_y = np.min(ys), np.max(ys)
     min_x, max_x = np.min(xs), np.max(xs)
 
-    # Decoupage au plus pres du contenu
     img_bgr_4x = img_bgr_4x[min_y:max_y+1, min_x:max_x+1]
     alpha_4x = alpha_4x[min_y:max_y+1, min_x:max_x+1]
-    print(f"✂️ Image rognée au plus près du sujet (nouvelles dimensions : {img_bgr_4x.shape[1]}x{img_bgr_4x.shape[0]} px)")
 
 # 🎨 ISOLATION DE LA TRANSPARENCE AVEC UNE COULEUR NEUTRE
 masque_transparent = alpha_4x == 0
@@ -107,9 +106,7 @@ if np.any(masque_transparent):
         couleur_fond = np.array([0, 255, 255], dtype=np.uint8)  # Jaune si Magenta existe
         
     img_bgr_4x[masque_transparent] = couleur_fond
-    print(f"🛡️ Fond transparent isolé avec la couleur neutre : BGR{list(couleur_fond)}")
 
-# Ajout du padding exact de 50px (ajusté au facteur d'échelle)
 couleur_padding = couleur_fond.tolist() if np.any(masque_transparent) else [0, 0, 0]
 
 img_bgr = cv2.copyMakeBorder(
@@ -130,7 +127,6 @@ pixels_visibles = img_lisse[masque_visible]
 
 # --- 💡 CLUSTERING K-MEANS ---
 NB_COULEURS = NB_COULEURS_CLIENT
-print(f"🎯 Traitement configuré pour exactement {NB_COULEURS} couleur(s).")
 
 kmeans = KMeans(n_clusters=NB_COULEURS, random_state=42, n_init=10).fit(pixels_visibles)
 couleurs = np.uint8(kmeans.cluster_centers_)
@@ -142,8 +138,6 @@ labels_matrice = labels_tous.reshape(hauteur, largeur)
 # ---------------------------------------------------------
 # 2. GÉNÉRATION ET FILTRAGE DES CALQUES PNG
 # ---------------------------------------------------------
-print("\n📸 ÉTAPE 1 : Génération et filtrage des calques PNG...")
-
 taille_noyau_ouverture = 2 * FACTEUR_ECHELLE + 1
 kernel_ouverture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (taille_noyau_ouverture, taille_noyau_ouverture))
 kernel_fermeture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -153,11 +147,9 @@ for i in range(NB_COULEURS):
 
     masque_brut = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
 
-    # Nettoyage morphologique
     masque_sans_lignes = cv2.morphologyEx(masque_brut, cv2.MORPH_OPEN, kernel_ouverture)
     masque_propre = cv2.morphologyEx(masque_sans_lignes, cv2.MORPH_CLOSE, kernel_fermeture)
 
-    # Filtrage par taille de composants
     nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_propre)
     masque_final = np.zeros_like(masque_propre)
 
@@ -168,7 +160,6 @@ for i in range(NB_COULEURS):
     surface_reelle = np.count_nonzero(masque_final)
 
     if surface_reelle < SURFACE_CALQUE_MIN:
-        print(f"  └─ ⚠️ Calque {i+1} ignoré (surface trop faible: {surface_reelle}px²).")
         continue
 
     calque_png = np.zeros((hauteur, largeur, 4), dtype=np.uint8)
@@ -180,13 +171,10 @@ for i in range(NB_COULEURS):
     chemin_sauvegarde = os.path.join(dossier_sortie_png, f"calque_{i+1}_#{code_hex}.png")
 
     cv2.imwrite(chemin_sauvegarde, calque_png)
-    print(f"  └─ Calque {i+1} enregistré : '{chemin_sauvegarde}' (Surface: {surface_reelle}px²)")
 
 # ---------------------------------------------------------
 # 3. TRI PAR SURFACE
 # ---------------------------------------------------------
-print("\n🧹 ÉTAPE 2 : Tri des calques...")
-
 fichiers_png = [f for f in os.listdir(dossier_sortie_png) if f.endswith(".png") and "#" in f]
 donnees_calques = []
 
@@ -212,8 +200,6 @@ donnees_calques.sort(key=lambda x: x["surface"], reverse=True)
 # ---------------------------------------------------------
 # 4. VECTORISATION
 # ---------------------------------------------------------
-print("\n🖊️ ÉTAPE 3 : Vectorisation Potrace...")
-
 def masque_vers_path_svg_hd(masque_binaire, dossier_tmp):
     tmp_id = uuid.uuid4().hex[:6]
     chemin_pbm = os.path.join(dossier_tmp, f"_tmp_{tmp_id}.pbm")
@@ -265,7 +251,6 @@ for calque in donnees_calques:
         f'<path d="{d_path}" fill="{code_hex}" fill-rule="evenodd" '
         f'stroke="{code_hex}" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round" /></g>'
     )
-    print(f"  └─ ✅ Vectorisé : '{fichier}'")
 
 lignes_svg.append("</svg>")
 
@@ -275,5 +260,5 @@ lignes_svg.append("</svg>")
 with open(chemin_sortie_svg, "w") as f:
     f.write("\n".join(lignes_svg))
 
-print(f"\n🎉 Vectorisation finale terminée avec succès !")
-print(f" 📄 SVG disponible ici : {chemin_sortie_svg}")
+# Impression du chemin final uniquement pour confirmation
+print(chemin_sortie_svg)

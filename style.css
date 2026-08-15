@@ -1,0 +1,281 @@
+/* =========================================================
+   1. VARIABLES & REINITIALISATION
+   ========================================================= */
+:root {
+    --bg-main: #0f172a;           /* Fond principal sombre */
+    --bg-card: #1e293b;           /* Fond des cartes et modales */
+    --accent: #6366f1;            /* Couleur primaire (Indigo moderne) */
+    --accent-hover: #4f46e5;      /* Couleur primaire au survol */
+    --text-primary: #f8fafc;      /* Texte principal très clair */
+    --text-secondary: #94a3b8;    /* Texte secondaire gris neutre */
+    --border-color: #334155;      /* Bordures subtiles */
+    --success: #10b981;           /* Vert pour le bouton télécharger */
+    --success-hover: #059669;
+    --radius-lg: 24px;
+    --radius-md: 12px;
+    --shadow-soft: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+body, html {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+}
+
+/* =========================================================
+   2. GESTION DES VUES
+   ========================================================= */
+.step-view {
+    display: none;
+    width: 100vw;
+    height: 100vh;
+    position: absolute;
+    top: 0;
+    left: 0;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+    transition: opacity 0.3s ease-in-out;
+}
+
+.step-view.active {
+    display: flex;
+}
+
+/* =========================================================
+   3. ÉTAPE 1 : DROPZONE PLEINE PAGE
+   ========================================================= */
+.dropzone {
+    width: 92%;
+    height: 92%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    border: 2px dashed var(--border-color);
+    cursor: pointer;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    border-radius: var(--radius-lg);
+    background-color: rgba(30, 41, 59, 0.2);
+}
+
+.dropzone:hover {
+    background-color: rgba(99, 102, 241, 0.05);
+    border-color: var(--accent);
+    transform: scale(0.995);
+}
+
+.dropzone-text {
+    font-size: 1.5rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    letter-spacing: -0.02em;
+    transition: color 0.3s ease;
+}
+
+.dropzone:hover .dropzone-text {
+    color: var(--text-primary);
+}
+
+/* =========================================================
+   4. ÉTAPE 2 : APERÇU ET POPUP MODAL (GLASSMORPHISM)
+   ========================================================= */
+.preview-container {
+    max-width: 80%;
+    max-height: 70vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.preview-container img {
+    max-width: 100%;
+    max-height: 70vh;
+    border-radius: var(--radius-md);
+    object-fit: contain;
+    box-shadow: var(--shadow-soft);
+}
+
+.popup-modal {
+    position: absolute;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(30, 41, 59, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    padding: 12px 24px;
+    border-radius: 50px;
+    box-shadow: var(--shadow-soft);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border: 1px solid var(--border-color);
+}
+
+.popup-modal label {
+    font-size: 0.95rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.popup-modal input {
+    width: 60px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: rgba(15, 23, 42, 0.6);
+    color: var(--text-primary);
+    text-align: center;
+    font-size: 1rem;
+    font-weight: 600;
+    outline: none;
+    transition: border-color 0.2s ease;
+}
+
+.popup-modal input:focus {
+    border-color: var(--accent);
+}
+
+.popup-modal button {
+    padding: 10px 22px;
+    border-radius: 50px;
+    border: none;
+    background: var(--accent);
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 0.95rem;
+    transition: all 0.2s ease;
+}
+
+.popup-modal button:hover {
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+}
+
+/* =========================================================
+   5. ÉTAPE 3 : CHARGEMENT ANIMÉ
+   ========================================================= */
+.loading-content {
+    text-align: center;
+}
+
+.spinner {
+    width: 50px;
+    height: 50px;
+    border: 3px solid var(--border-color);
+    border-top: 3px solid var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s cubic-bezier(0.6, 0.2, 0.4, 0.8) infinite;
+    margin: 0 auto 24px auto;
+}
+
+#loading-status-text {
+    font-size: 1.1rem;
+    color: var(--text-secondary);
+    font-weight: 400;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* =========================================================
+   6. ÉTAPE 4 : RÉSULTAT SVG (MÊMES DIMENSIONS QUE L'ÉAPE 2)
+   ========================================================= */
+.svg-result-container {
+    max-width: 80%;
+    max-height: 70vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: var(--bg-card);
+    border-radius: var(--radius-md);
+    padding: 10px;
+    box-shadow: var(--shadow-soft);
+    border: 1px solid var(--border-color);
+}
+
+#svg-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+#svg-container svg {
+    max-width: 100%;
+    max-height: 70vh;
+    object-fit: contain;
+    border-radius: var(--radius-md);
+}
+
+.action-bar {
+    position: absolute;
+    bottom: 40px;
+}
+
+.btn-download {
+    padding: 14px 32px;
+    background: var(--success);
+    color: #ffffff;
+    text-decoration: none;
+    border-radius: 50px;
+    font-weight: 600;
+    font-size: 1rem;
+    box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.4);
+    transition: all 0.2s ease;
+    display: inline-block;
+}
+
+.btn-download:hover {
+    background: var(--success-hover);
+    transform: translateY(-2px);
+    box-shadow: 0 15px 30px -5px rgba(16, 185, 129, 0.5);
+}
+
+/* =========================================================
+   AJUSTEMENT DU CONTENEUR DES BOUTONS ET DU BOUTON RETOUR
+   ========================================================= */
+.action-bar {
+    position: absolute;
+    bottom: 40px;
+    display: flex;
+    align-items: center;
+    gap: 16px; /* Espace entre la flèche et le bouton télécharger */
+}
+
+.btn-back {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: 1px solid var(--border-color);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 1.2rem;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    box-shadow: var(--shadow-soft);
+    transition: all 0.2s ease;
+}
+
+.btn-back:hover {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+    transform: translateX(-3px); /* Effet de recul au survol */
+}
