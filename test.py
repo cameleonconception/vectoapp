@@ -34,7 +34,7 @@ except ValueError:
 
 # Facteur d'échelle & réglages anti-bruit
 FACTEUR_ECHELLE = 4                                 # Agrandissement 4x standard
-TAILLE_GRAIN_MIN = 50 * (FACTEUR_ECHELLE ** 2)      # Filtre anti-bruit local (pixels²)
+TAILLE_GRAIN_MIN = 80 * (FACTEUR_ECHELLE ** 2)      # Filtre anti-bruit local (pixels²)
 SURFACE_CALQUE_MIN = 300 * (FACTEUR_ECHELLE ** 2)  # Surface minimale globale (pixels²)
 PADDING = 50 * FACTEUR_ECHELLE                      # Marge de sécurité (pixels)
 
@@ -87,18 +87,23 @@ alpha = cv2.copyMakeBorder(
 )
 
 hauteur, largeur = img_bgr.shape[:2]
+
+# 🧹 PRÉ-TRAITEMENT DES COULEURS : Lissage agressif pour éliminer l'anti-aliasing des contours
+img_lisse = cv2.medianBlur(img_bgr, 9)
+img_lisse = cv2.bilateralFilter(img_lisse, d=11, sigmaColor=80, sigmaSpace=80)
+
 masque_visible = alpha > 0
-pixels_visibles = img_bgr[masque_visible]
+pixels_visibles = img_lisse[masque_visible]
 
 # --- 💡 CLUSTERING SELON LE NOMBRE DE COULEURS DEMANDÉ ---
 NB_COULEURS = NB_COULEURS_CLIENT
 print(f"🎯 Traitement configuré pour exactement {NB_COULEURS} couleur(s).")
 
-# Clustering K-Means
+# Clustering K-Means sur les pixels lissés
 kmeans = KMeans(n_clusters=NB_COULEURS, random_state=42, n_init=10).fit(pixels_visibles)
 couleurs = np.uint8(kmeans.cluster_centers_)
 
-pixels_tous = img_bgr.reshape(-1, 3)
+pixels_tous = img_lisse.reshape(-1, 3)
 labels_tous = kmeans.predict(pixels_tous)
 labels_matrice = labels_tous.reshape(hauteur, largeur)
 
@@ -107,8 +112,10 @@ labels_matrice = labels_tous.reshape(hauteur, largeur)
 # ---------------------------------------------------------
 print("\n📸 ÉTAPE 1 : Génération et filtrage des calques PNG...")
 
+# Noyau pour éliminer les traits/contours fins (ouverture morphologique)
+taille_noyau_ouverture = 2 * FACTEUR_ECHELLE + 1  # Élimine les traits fins de moins de ~8px d'épaisseur
+kernel_ouverture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (taille_noyau_ouverture, taille_noyau_ouverture))
 kernel_fermeture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-kernel_dilatation = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
 for i in range(NB_COULEURS):
     couleur_b, couleur_g, couleur_r = couleurs[i]
@@ -119,14 +126,15 @@ for i in range(NB_COULEURS):
 
     masque_brut = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
 
-    masque_propre = cv2.morphologyEx(masque_brut, cv2.MORPH_CLOSE, kernel_fermeture)
-    masque_flou = cv2.GaussianBlur(masque_propre, (5, 5), 0)
-    _, masque_lisse = cv2.threshold(masque_flou, 127, 255, cv2.THRESH_BINARY)
-    masque_dilate = cv2.dilate(masque_lisse, kernel_dilatation, iterations=1)
+    # 1. Élimination des lignes et contours fins
+    masque_sans_lignes = cv2.morphologyEx(masque_brut, cv2.MORPH_OPEN, kernel_ouverture)
 
-    # Filtrage des isolats de bruit (placé après dilatation)
-    nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_dilate)
-    masque_final = np.zeros_like(masque_dilate)
+    # 2. Nettoyage des bords et comblement des petits trous dans les formes pleines
+    masque_propre = cv2.morphologyEx(masque_sans_lignes, cv2.MORPH_CLOSE, kernel_fermeture)
+
+    # 3. Filtrage par taille de composants connexes (supprime les ilôts isolés)
+    nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_propre)
+    masque_final = np.zeros_like(masque_propre)
 
     for obj_i in range(1, nb_labels):
         if stats[obj_i, cv2.CC_STAT_AREA] >= TAILLE_GRAIN_MIN:
