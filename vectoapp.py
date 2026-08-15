@@ -9,12 +9,11 @@ import cv2
 import numpy as np
 from sklearn.cluster import MiniBatchKMeans
 from PIL import Image
+import shutil
 
 # =========================================================
 # 1. FIXATION DU DOSSIER DE TRAVAIL ABSOLU
 # =========================================================
-# Garantit que le script s'exécute toujours depuis son propre dossier,
-# qu'il soit lancé par le terminal ou par un serveur Web (PHP).
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE_DIR)
 
@@ -30,7 +29,6 @@ if len(sys.argv) >= 3:
     except ValueError:
         NB_COULEURS_CLIENT = 4
 else:
-    # Mode secours si le script est lancé manuellement dans le terminal
     imgName = input("Entrez le nom du fichier à vectoriser (ex: logo.png) : ").strip()
     saisie_couleurs = input("Combien de couleurs comporte votre logo ? (ex: 4) : ").strip()
     try:
@@ -49,7 +47,6 @@ if not os.path.exists(chemin_entree):
 
 dossier_sortie_png = os.path.join(BASE_DIR, "img", "calques_png", session_id)
 dossier_sortie_svg = os.path.join(BASE_DIR, "img", "vectorized", session_id)
-chemin_sortie_svg = os.path.join(dossier_sortie_svg, f"{os.path.splitext(imgName)[0]}_vectorise.svg")
 
 # Paramètres globaux de Potrace
 POTRACE_ALPHACORNER = 1.33
@@ -68,11 +65,9 @@ if image_brute is None:
     print(f"Erreur : Impossible de charger l'image {chemin_entree}")
     sys.exit(1)
 
-# Extraction des dimensions initiales
 h_orig, w_orig = image_brute.shape[:2]
 dimension_max = max(h_orig, w_orig)
 
-# Calcul du facteur d'échelle dynamique pour optimiser le temps de calcul
 if dimension_max < 500:
     FACTEUR_ECHELLE = 4
 elif dimension_max < 1200:
@@ -80,12 +75,10 @@ elif dimension_max < 1200:
 else:
     FACTEUR_ECHELLE = 1
 
-# Ajustement automatique des seuils d'anti-bruit
-TAILLE_GRAIN_MIN = 80 * (FACTEUR_ECHELLE ** 2)      # Taille minimale d'un élément standard (px²)
-SURFACE_CALQUE_MIN = 300 * (FACTEUR_ECHELLE ** 2)   # Surface minimale globale d'un calque (px²)
-PADDING = 50 * FACTEUR_ECHELLE                      # Marge de sécurité (px)
+TAILLE_GRAIN_MIN = 80 * (FACTEUR_ECHELLE ** 2)
+SURFACE_CALQUE_MIN = 300 * (FACTEUR_ECHELLE ** 2)
+PADDING = 50 * FACTEUR_ECHELLE
 
-# Séparation des canaux BGR et Alpha (transparence)
 if len(image_brute.shape) == 3 and image_brute.shape[2] == 4:
     b, g, r, alpha_brut = cv2.split(image_brute)
     img_bgr_brut = cv2.merge([b, g, r])
@@ -93,7 +86,6 @@ else:
     img_bgr_brut = image_brute
     alpha_brut = np.ones((h_orig, w_orig), dtype=np.uint8) * 255
 
-# Redimensionnement (Upscaling)
 nouvelle_largeur = w_orig * FACTEUR_ECHELLE
 nouvelle_hauteur = h_orig * FACTEUR_ECHELLE
 
@@ -116,7 +108,6 @@ if len(ys) > 0 and len(xs) > 0:
     img_bgr_4x = img_bgr_4x[min_y:max_y+1, min_x:max_x+1]
     alpha_4x = alpha_4x[min_y:max_y+1, min_x:max_x+1]
 
-# Isolation des zones transparentes par une couleur neutre (Magenta ou Jaune)
 masque_transparent = alpha_4x == 0
 couleur_fond = np.array([255, 0, 255], dtype=np.uint8)
 
@@ -128,7 +119,6 @@ if np.any(masque_transparent):
 
 couleur_padding = couleur_fond.tolist() if np.any(masque_transparent) else [0, 0, 0]
 
-# Ajout du Padding
 img_bgr = cv2.copyMakeBorder(img_bgr_4x, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=couleur_padding)
 alpha = cv2.copyMakeBorder(alpha_4x, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=0)
 
@@ -137,14 +127,12 @@ hauteur, largeur = img_bgr.shape[:2]
 # =========================================================
 # 5. PRÉ-TRAITEMENT ET CLUSTERING DES COULEURS
 # =========================================================
-# Lissage pour éliminer les artefacts d'anti-aliasing aux bordures
 img_lisse = cv2.medianBlur(img_bgr, 9)
 img_lisse = cv2.bilateralFilter(img_lisse, d=11, sigmaColor=80, sigmaSpace=80)
 
 masque_visible = alpha > 0
 pixels_visibles = img_lisse[masque_visible]
 
-# Échantillonnage pour accélérer MiniBatchKMeans
 pixels_echantillon = pixels_visibles[::5]
 
 kmeans = MiniBatchKMeans(
@@ -164,17 +152,13 @@ labels_matrice = labels_tous.reshape(hauteur, largeur)
 # 6. FILTRAGE INTELLIGENT : TAILLE + NETTETÉ DES CONTOURS
 # =========================================================
 def calculer_carte_nettete(image_bgr):
-    """
-    Calcule l'intensité des contours de l'image avec l'opérateur de Sobel.
-    Plus les bords sont nets, plus la valeur du gradient est élevée.
-    """
     gris = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     sobelx = cv2.Sobel(gris, cv2.CV_64F, 1, 0, ksize=3)
     sobely = cv2.Sobel(gris, cv2.CV_64F, 0, 1, ksize=3)
     return cv2.magnitude(sobelx, sobely)
 
 carte_nettete = calculer_carte_nettete(img_bgr)
-SEUIL_NETTETE_MIN = 40  # Seuil de netteté minimale pour conserver un petit détail
+SEUIL_NETTETE_MIN = 40
 
 taille_noyau_ouverture = 2 * FACTEUR_ECHELLE + 1
 kernel_ouverture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (taille_noyau_ouverture, taille_noyau_ouverture))
@@ -186,21 +170,17 @@ for i in range(NB_COULEURS_CLIENT):
     couleur_b, couleur_g, couleur_r = couleurs[i]
     masque_brut = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
 
-    # Nettoyage des contours
     masque_sans_lignes = cv2.morphologyEx(masque_brut, cv2.MORPH_OPEN, kernel_ouverture)
     masque_propre = cv2.morphologyEx(masque_sans_lignes, cv2.MORPH_CLOSE, kernel_fermeture)
 
-    # Analyse des composants connexes
     nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_propre)
     masque_final = np.zeros_like(masque_propre)
 
     for obj_i in range(1, nb_labels):
         surface = stats[obj_i, cv2.CC_STAT_AREA]
         
-        # 1. Si l'élément est grand, on le conserve d'office
         if surface >= TAILLE_GRAIN_MIN:
             masque_final[labels_obj == obj_i] = 255
-        # 2. Si l'élément est petit, on conserve uniquement s'il est très NET (bords francs)
         elif surface >= (TAILLE_GRAIN_MIN / 4):
             masque_objet = np.uint8(labels_obj == obj_i) * 255
             contours, _ = cv2.findContours(masque_objet, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -232,10 +212,6 @@ donnees_calques.sort(key=lambda x: x["surface"], reverse=True)
 # 7. VECTORISATION VIA POTRACE
 # =========================================================
 def masque_vers_path_svg_hd(masque_binaire):
-    """
-    Convertit un masque binaire en tracé SVG à l'aide de Potrace.
-    Utilise des fichiers temporaires système sécurisés.
-    """
     with tempfile.NamedTemporaryFile(suffix=".pbm", delete=False) as tmp_pbm, \
          tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as tmp_svg:
         
@@ -266,7 +242,6 @@ def masque_vers_path_svg_hd(masque_binaire):
         return " ".join(correspondances) if correspondances else None
 
     finally:
-        # Nettoyage systématique des fichiers temporaires
         if os.path.exists(chemin_pbm): os.remove(chemin_pbm)
         if os.path.exists(chemin_svg): os.remove(chemin_svg)
 
@@ -287,14 +262,35 @@ for calque in donnees_calques:
 
 lignes_svg.append("</svg>")
 
-# =========================================================
-# 8. SAUVEGARDE ET NETTOYAGE MÉMOIRE
-# =========================================================
-with open(chemin_sortie_svg, "w", encoding="utf-8") as f:
-    f.write("\n".join(lignes_svg))
+contenu_svg = "\n".join(lignes_svg)
 
-# Libération explicite de la mémoire
+# =========================================================
+# 8. NETTOYAGE COMPLET ET ENVOI DU SVG
+# =========================================================
+
+# 1. Suppression de l'image source d'origine
+if os.path.exists(chemin_entree):
+    try:
+        os.remove(chemin_entree)
+    except Exception:
+        pass
+
+# 2. Suppression du dossier de calques PNG temporaires
+if os.path.exists(dossier_sortie_png):
+    try:
+        shutil.rmtree(dossier_sortie_png)
+    except Exception:
+        pass
+
+# 3. Suppression du dossier temporaire vectorized de cette session
+if os.path.exists(dossier_sortie_svg):
+    try:
+        shutil.rmtree(dossier_sortie_svg)
+    except Exception:
+        pass
+
+# Libération mémoire
 gc.collect()
 
-# Seule cette ligne est imprimée pour la récupération par PHP
-print(chemin_sortie_svg)
+# Envoi direct du flux XML SVG au PHP
+print(contenu_svg)

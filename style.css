@@ -44,11 +44,13 @@ body, html {
     justify-content: center;
     align-items: center;
     padding: 20px;
+    opacity: 0; /* Définir le point de départ */
     transition: opacity 0.3s ease-in-out;
 }
 
 .step-view.active {
     display: flex;
+    opacity: 1; /* L'opacité redevient totale lorsqu'elle est active */
 }
 
 /* =========================================================
@@ -101,7 +103,10 @@ body, html {
     max-height: 70vh;
     border-radius: var(--radius-md);
     object-fit: contain;
-    box-shadow: var(--shadow-soft);
+    /* Solution : appliquer un fond opaque et s'assurer que l'opacité est à 100% */
+    background-color: unset;
+    opacity: 1;
+    filter: none;
 }
 
 .popup-modal {

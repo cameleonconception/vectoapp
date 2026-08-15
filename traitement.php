@@ -1,10 +1,10 @@
 <?php
-// 🚀 SUPPRESSION DE LA LIMITE DE TEMPS D'EXÉCUTION PHP (Permet les traitements longs)
+// 🚀 SUPPRESSION DE LA LIMITE DE TEMPS D'EXÉCUTION PHP
 set_time_limit(0);
 ini_set('max_execution_time', 0);
 
 // ---------------------------------------------------------
-// CONFIGURATION DES CHEMINS ABSOLUS (PORTABLE LINUX / WINDOWS)
+// CONFIGURATION DES CHEMINS ABSOLUS
 // ---------------------------------------------------------
 $base_dir = __DIR__;
 $dossier_reception = $base_dir . DIRECTORY_SEPARATOR . "img" . DIRECTORY_SEPARATOR . "toBeVectorized" . DIRECTORY_SEPARATOR;
@@ -32,16 +32,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['image'])) {
             $commande = "export LC_ALL=C.UTF-8; python3 " . escapeshellarg($chemin_script_python) . " " . escapeshellarg($nom_fichier) . " " . escapeshellarg($nombre_couleurs) . " 2>&1";
         }
         
-        // Exécution de la commande
-        $chemin_svg_genere = trim(shell_exec($commande));
+        // Exécution de la commande Python
+        $resultat_python = trim(shell_exec($commande));
         
-        // Vérification et renvoi du SVG
-        if (!empty($chemin_svg_genere) && file_exists($chemin_svg_genere)) {
-            echo file_get_contents($chemin_svg_genere);
+        // Vérification : la sortie contient-elle de la balise SVG ?
+        if (!empty($resultat_python) && strpos($resultat_python, '<svg') !== false) {
+            // Renvoie le flux SVG directement
+            echo $resultat_python;
             exit();
         } else {
             http_response_code(500);
-            echo "Erreur lors de la génération. Console : " . $chemin_svg_genere;
+            echo "Erreur lors de la génération. Console : " . $resultat_python;
             exit();
         }
     } else {
