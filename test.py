@@ -20,13 +20,12 @@ dossier_sortie_svg = f"img/vectorized/{session_id}"
 chemin_sortie_svg = os.path.join(dossier_sortie_svg, "logo_final.svg")
 
 NB_COULEURS = 6
-TAILLE_GRAIN_MIN = 25  # Filtre les petits bruits isolés (en pixels²)
+TAILLE_GRAIN_MIN = 30  # Filtre anti-bruit (en pixels²)
 
-# Paramètres Potrace (les vrais leviers pour courbes vs lignes droites)
-POTRACE_ALPHACORNER = 1.0   # 0 = tout en angles droits, 1.33 (défaut) = très arrondi.
-                             # Baisse-le (ex: 0.5-0.8) pour préserver plus de coins nets.
-POTRACE_OPTTOLERANCE = 0.2  # Tolérance d'optimisation des courbes (0.2 = défaut, plus bas = plus fidèle/plus de points)
-POTRACE_TURDSIZE = 2        # Ignore les taches < N pixels (bruit), séparé de TAILLE_GRAIN_MIN
+# 🎯 PARAMÈTRES POTRACE AJUSTÉS POUR CORRIGER LES POINTES
+POTRACE_ALPHACORNER = 1.33  # > 1.0 = Force des courbes ultra-lisses et élimine les angles inutiles
+POTRACE_OPTTOLERANCE = 0.4  # Tolérance accrue pour fusionner les segments hachés
+POTRACE_TURDSIZE = 5        # Élimine davantage le micro-bruit de bordure
 
 os.makedirs(dossier_sortie_png, exist_ok=True)
 os.makedirs(dossier_sortie_svg, exist_ok=True)
@@ -34,8 +33,7 @@ os.makedirs(dossier_sortie_svg, exist_ok=True)
 print(f"🔑 Session ID unique généré : {session_id}")
 
 # ---------------------------------------------------------
-# 1. CHARGEMENT ET DÉCOUPAGE EN CALQUES PNG EXACTS
-#    (Inchangé : c'est la partie qui marche bien)
+# 1. CHARGEMENT ET DÉCOUPAGE EN CALQUES PNG
 # ---------------------------------------------------------
 image = cv2.imread(chemin_entree, cv2.IMREAD_UNCHANGED)
 
@@ -62,10 +60,10 @@ pixels_tous = img_bgr.reshape(-1, 3)
 labels_tous = kmeans.predict(pixels_tous)
 labels_matrice = labels_tous.reshape(hauteur, largeur)
 
-print("\n📸 ÉTAPE 1 : Génération des calques PNG nettoyés...")
+print("\n📸 ÉTAPE 1 : Génération et filtrage des calques PNG...")
 
-kernel_fermeture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-kernel_dilatation = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+kernel_fermeture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+kernel_dilatation = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
 for i in range(NB_COULEURS):
     couleur_b, couleur_g, couleur_r = couleurs[i]
@@ -74,8 +72,21 @@ for i in range(NB_COULEURS):
         continue
 
     masque_couleur = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
-    masque_propre = cv2.morphologyEx(masque_couleur, cv2.MORPH_CLOSE, kernel_fermeture)
-    masque_flou = cv2.GaussianBlur(masque_propre, (3, 3), 0)
+    
+    # Suppression du bruit isolé via composantes connexes
+    nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_couleur)
+    masque_sans_bruit = np.zeros_like(masque_couleur)
+    
+    for obj_i in range(1, nb_labels):
+        if stats[obj_i, cv2.CC_STAT_AREA] >= TAILLE_GRAIN_MIN:
+            masque_sans_bruit[labels_obj == obj_i] = 255
+
+    if np.count_nonzero(masque_sans_bruit) == 0:
+        continue
+
+    # 🧼 NETTOYAGE & LISSAGE DES BORDS (Aplatissement des pointes)
+    masque_propre = cv2.morphologyEx(masque_sans_bruit, cv2.MORPH_CLOSE, kernel_fermeture)
+    masque_flou = cv2.GaussianBlur(masque_propre, (5, 5), 0)
     _, masque_lisse = cv2.threshold(masque_flou, 127, 255, cv2.THRESH_BINARY)
     masque_final = cv2.dilate(masque_lisse, kernel_dilatation, iterations=1)
 
@@ -88,12 +99,12 @@ for i in range(NB_COULEURS):
     chemin_sauvegarde = os.path.join(dossier_sortie_png, f"calque_{i+1}_#{code_hex}.png")
 
     cv2.imwrite(chemin_sauvegarde, calque_png)
-    print(f"  └─ Calque {i+1} lissé et étendu enregistré : '{chemin_sauvegarde}'")
+    print(f"  └─ Calque {i+1} nettoyé enregistré : '{chemin_sauvegarde}'")
 
 # ---------------------------------------------------------
-# 2. TRI PAR SURFACE DÉCROISSANTE (inchangé)
+# 2. TRI PAR SURFACE DÉCROISSANTE
 # ---------------------------------------------------------
-print("\n✒️ ÉTAPE 2 : Analyse et tri par surface...")
+print("\n✒️ ÉTAPE 2 : Tri par surface...")
 
 fichiers_png = [f for f in os.listdir(dossier_sortie_png) if f.endswith(".png") and "#" in f]
 donnees_calques = []
@@ -108,44 +119,35 @@ for fichier in fichiers_png:
     alpha_calque = calque_img[:, :, 3]
     masque_binaire = np.uint8(alpha_calque > 0) * 255
 
-    surface_totale = np.count_nonzero(masque_binaire)
-    code_hex = "#" + fichier.split("#")[1].split(".")[0]
-
     donnees_calques.append({
         "fichier": fichier,
-        "hex": code_hex,
-        "surface": surface_totale,
+        "hex": "#" + fichier.split("#")[1].split(".")[0],
+        "surface": np.count_nonzero(masque_binaire),
         "masque": masque_binaire,
     })
 
 donnees_calques.sort(key=lambda x: x["surface"], reverse=True)
 
 # ---------------------------------------------------------
-# 3. VECTORISATION AVEC VRAIES COURBES / LIGNES / COINS (POTRACE)
+# 3. VECTORISATION HAUTE DÉFINITION LISSE
 # ---------------------------------------------------------
-print("\n🖊️  ÉTAPE 3 : Vectorisation Potrace (courbes de Bézier + coins nets)...")
+print("\n🖊️ ÉTAPE 3 : Vectorisation Potrace Lisse...")
 
-
-def masque_vers_path_svg(masque_binaire, dossier_tmp):
-    """
-    Convertit un masque binaire en un fragment de path SVG (attribut `d`)
-    contenant de vraies courbes de Bézier cubiques (c) pour les zones
-    lisses et de vraies lignes droites (l/m) pour les angles, via Potrace.
-    Potrace travaille en coordonnées Y-inversées et à l'échelle 1/10pt,
-    donc on renormalise ensuite le `d` dans le repère image (pixels, Y vers le bas).
-    """
+def masque_vers_path_svg_hd(masque_binaire, dossier_tmp):
     tmp_id = uuid.uuid4().hex[:6]
     chemin_pbm = os.path.join(dossier_tmp, f"_tmp_{tmp_id}.pbm")
     chemin_svg = os.path.join(dossier_tmp, f"_tmp_{tmp_id}.svg")
 
-    # Potrace lit un bitmap 1-bit (PBM) où les pixels "noirs" sont tracés.
-    # PIL/PBM : blanc (255) -> bit 0 (non-encre), donc il FAUT inverser
-    # notre masque (255=forme) pour que la forme soit bien "noire" = tracée.
-    Image.fromarray(255 - masque_binaire).convert("1").save(chemin_pbm)
+    # 🚀 UPSCALING ET LISSAGE : Utilisation d'un redimensionnement Bilinéaire + Flou anti-crénelage
+    masque_hd = cv2.resize(masque_binaire, (largeur * 2, hauteur * 2), interpolation=cv2.INTER_LINEAR)
+    masque_hd = cv2.GaussianBlur(masque_hd, (3, 3), 0)
+    _, masque_hd = cv2.threshold(masque_hd, 127, 255, cv2.THRESH_BINARY)
+
+    Image.fromarray(255 - masque_hd).convert("1").save(chemin_pbm)
 
     cmd = [
         "potrace",
-        "-s",                              # sortie SVG
+        "-s",
         "-o", chemin_svg,
         "-a", str(POTRACE_ALPHACORNER),
         "-O", str(POTRACE_OPTTOLERANCE),
@@ -154,26 +156,18 @@ def masque_vers_path_svg(masque_binaire, dossier_tmp):
     ]
     resultat = subprocess.run(cmd, capture_output=True, text=True)
     if resultat.returncode != 0:
-        print(f"    ⚠️  Potrace a échoué : {resultat.stderr}")
-        os.remove(chemin_pbm)
+        if os.path.exists(chemin_pbm): os.remove(chemin_pbm)
         return None
 
     with open(chemin_svg, "r") as f:
         contenu = f.read()
 
-    # Extrait le(s) attribut(s) d="..." du path généré par potrace
     correspondances = re.findall(r'<path[^>]*\sd="([^"]+)"', contenu)
 
-    os.remove(chemin_pbm)
-    os.remove(chemin_svg)
+    if os.path.exists(chemin_pbm): os.remove(chemin_pbm)
+    if os.path.exists(chemin_svg): os.remove(chemin_svg)
 
-    if not correspondances:
-        return None
-
-    # Potrace émet dans un <g transform="translate(0,H) scale(0.1,-0.1)">.
-    # On applique cette transform directement au <path> plutôt que de
-    # ré-écrire les coordonnées à la main : plus simple et zéro perte de précision.
-    return " ".join(correspondances)
+    return " ".join(correspondances) if correspondances else None
 
 
 lignes_svg = [
@@ -188,21 +182,17 @@ for calque in donnees_calques:
     if np.count_nonzero(masque_binaire) < TAILLE_GRAIN_MIN:
         continue
 
-    d_path = masque_vers_path_svg(masque_binaire, dossier_sortie_png)
+    d_path = masque_vers_path_svg_hd(masque_binaire, dossier_sortie_png)
 
     if d_path is None:
-        print(f"  └─ ⚠️  Aucun contour exploitable pour : '{fichier}'")
         continue
 
-    # Potrace: origine en bas-gauche, échelle 1/10pt -> on remet à l'échelle
-    # pixel (x10) et on inverse Y (translate(0,H) scale(1,-1)) pour retrouver
-    # le repère SVG standard (Y vers le bas, origine en haut-gauche).
     lignes_svg.append(
-        f'  <g transform="translate(0,{hauteur}) scale(0.1,-0.1)">'
+        f'  <g transform="translate(0,{hauteur}) scale(0.05,-0.05)">'
         f'<path d="{d_path}" fill="{code_hex}" fill-rule="evenodd" '
-        f'stroke="{code_hex}" stroke-width="5" stroke-linejoin="round" /></g>'
+        f'stroke="{code_hex}" stroke-width="0.5" stroke-linejoin="round" stroke-linecap="round" /></g>'
     )
-    print(f"  └─ ✅ Vectorisé (courbes+coins réels) : '{fichier}'")
+    print(f"  └─ ✅ Vectorisé avec courbes lisses : '{fichier}'")
 
 lignes_svg.append("</svg>")
 
@@ -212,6 +202,6 @@ lignes_svg.append("</svg>")
 with open(chemin_sortie_svg, "w") as f:
     f.write("\n".join(lignes_svg))
 
-print(f"\n🎉 Vectorisation terminée ! Fichiers de la session '{session_id}' :")
+print(f"\n🎉 Vectorisation finale terminée avec succès !")
 print(f" 📂 PNG : {dossier_sortie_png}")
 print(f" 📄 SVG : {chemin_sortie_svg}")
