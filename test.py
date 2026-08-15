@@ -12,25 +12,33 @@ from PIL import Image
 # ---------------------------------------------------------
 session_id = uuid.uuid4().hex[:8]
 
-imgName = "logo.png"
+# 🚀 DEMANDE DES INFORMATIONS À L'UTILISATEUR
+print("--- CONFIGURATION DU TRAITEMENT ---")
+
+# 1. Demande du nom de fichier
+imgName = input("Entrez le nom du fichier à vectoriser (ex: logo.png) : ").strip()
 chemin_entree = f"img/toBeVectorized/{imgName}"
 
-dossier_sortie_png = f"img/calques_png/{session_id}"
-dossier_sortie_svg = f"img/vectorized/{session_id}"
-chemin_sortie_svg = os.path.join(dossier_sortie_svg, "logo_final.svg")
+# Vérification de l'existence du fichier
+if not os.path.exists(chemin_entree):
+    print(f"❌ Erreur : Le fichier '{chemin_entree}' n'existe pas. Veuillez le placer dans le dossier 'img/toBeVectorized/'.")
+    exit()
 
-# 🚀 DEMANDE DU NOMBRE DE COULEURS À L'UTILISATEUR
-print("--- CONFIGURATION DU TRAITEMENT ---")
-saisie_utilisateur = input("Combien de couleurs comporte votre logo ? (ex: 4) : ")
+# 2. Demande du nombre de couleurs
+saisie_couleurs = input("Combien de couleurs comporte votre logo ? (ex: 4) : ").strip()
 
 try:
-    NB_COULEURS_CLIENT = int(saisie_utilisateur)
+    NB_COULEURS_CLIENT = int(saisie_couleurs)
     if NB_COULEURS_CLIENT < 1:
         print("⚠️ Nombre invalide. Valeur par défaut appliquée : 4 couleurs.")
         NB_COULEURS_CLIENT = 4
 except ValueError:
     print("⚠️ Entrée non numérique. Valeur par défaut appliquée : 4 couleurs.")
     NB_COULEURS_CLIENT = 4
+
+dossier_sortie_png = f"img/calques_png/{session_id}"
+dossier_sortie_svg = f"img/vectorized/{session_id}"
+chemin_sortie_svg = os.path.join(dossier_sortie_svg, f"{os.path.splitext(imgName)[0]}_vectorise.svg")
 
 # Facteur d'échelle & réglages anti-bruit
 FACTEUR_ECHELLE = 4                                 # Agrandissement 4x standard
@@ -49,7 +57,7 @@ os.makedirs(dossier_sortie_svg, exist_ok=True)
 print(f"\n🔑 Session ID unique généré : {session_id}")
 
 # ---------------------------------------------------------
-# 1. CHARGEMENT, UPSCALING STANDARD ET PADDING
+# 1. CHARGEMENT, UPSCALING ET ROGNAGE AUTOMATIQUE (CROP)
 # ---------------------------------------------------------
 image_brute = cv2.imread(chemin_entree, cv2.IMREAD_UNCHANGED)
 
@@ -76,11 +84,36 @@ img_bgr_4x = cv2.resize(img_bgr_brut, (nouvelle_largeur, nouvelle_hauteur), inte
 alpha_4x = cv2.resize(alpha_brut, (nouvelle_largeur, nouvelle_hauteur), interpolation=cv2.INTER_LANCZOS4)
 _, alpha_4x = cv2.threshold(alpha_4x, 127, 255, cv2.THRESH_BINARY)
 
-print(f"📈 Image agrandie (Lanczos) : {w_orig}x{h_orig} px ➡️ {nouvelle_largeur}x{nouvelle_hauteur} px")
+# ✂️ ROGNAGE DU TROP-PLEIN D'ESPACE VIDE (CROP)
+ys, xs = np.where(alpha_4x > 0)
 
-# Ajout du padding de sécurité
+if len(ys) > 0 and len(xs) > 0:
+    min_y, max_y = np.min(ys), np.max(ys)
+    min_x, max_x = np.min(xs), np.max(xs)
+
+    # Decoupage au plus pres du contenu
+    img_bgr_4x = img_bgr_4x[min_y:max_y+1, min_x:max_x+1]
+    alpha_4x = alpha_4x[min_y:max_y+1, min_x:max_x+1]
+    print(f"✂️ Image rognée au plus près du sujet (nouvelles dimensions : {img_bgr_4x.shape[1]}x{img_bgr_4x.shape[0]} px)")
+
+# 🎨 ISOLATION DE LA TRANSPARENCE AVEC UNE COULEUR NEUTRE
+masque_transparent = alpha_4x == 0
+couleur_fond = np.array([255, 0, 255], dtype=np.uint8)  # Magenta par défaut
+
+if np.any(masque_transparent):
+    pixels_utilises = img_bgr_4x[alpha_4x > 0]
+    
+    if len(pixels_utilises) > 0 and np.any(np.all(pixels_utilises == couleur_fond, axis=1)):
+        couleur_fond = np.array([0, 255, 255], dtype=np.uint8)  # Jaune si Magenta existe
+        
+    img_bgr_4x[masque_transparent] = couleur_fond
+    print(f"🛡️ Fond transparent isolé avec la couleur neutre : BGR{list(couleur_fond)}")
+
+# Ajout du padding exact de 50px (ajusté au facteur d'échelle)
+couleur_padding = couleur_fond.tolist() if np.any(masque_transparent) else [0, 0, 0]
+
 img_bgr = cv2.copyMakeBorder(
-    img_bgr_4x, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=[0, 0, 0]
+    img_bgr_4x, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=couleur_padding
 )
 alpha = cv2.copyMakeBorder(
     alpha_4x, PADDING, PADDING, PADDING, PADDING, cv2.BORDER_CONSTANT, value=0
@@ -88,18 +121,17 @@ alpha = cv2.copyMakeBorder(
 
 hauteur, largeur = img_bgr.shape[:2]
 
-# 🧹 PRÉ-TRAITEMENT DES COULEURS : Lissage agressif pour éliminer l'anti-aliasing des contours
+# 🧹 PRÉ-TRAITEMENT : Lissage pour éliminer l'anti-aliasing
 img_lisse = cv2.medianBlur(img_bgr, 9)
 img_lisse = cv2.bilateralFilter(img_lisse, d=11, sigmaColor=80, sigmaSpace=80)
 
 masque_visible = alpha > 0
 pixels_visibles = img_lisse[masque_visible]
 
-# --- 💡 CLUSTERING SELON LE NOMBRE DE COULEURS DEMANDÉ ---
+# --- 💡 CLUSTERING K-MEANS ---
 NB_COULEURS = NB_COULEURS_CLIENT
 print(f"🎯 Traitement configuré pour exactement {NB_COULEURS} couleur(s).")
 
-# Clustering K-Means sur les pixels lissés
 kmeans = KMeans(n_clusters=NB_COULEURS, random_state=42, n_init=10).fit(pixels_visibles)
 couleurs = np.uint8(kmeans.cluster_centers_)
 
@@ -112,27 +144,20 @@ labels_matrice = labels_tous.reshape(hauteur, largeur)
 # ---------------------------------------------------------
 print("\n📸 ÉTAPE 1 : Génération et filtrage des calques PNG...")
 
-# Noyau pour éliminer les traits/contours fins (ouverture morphologique)
-taille_noyau_ouverture = 2 * FACTEUR_ECHELLE + 1  # Élimine les traits fins de moins de ~8px d'épaisseur
+taille_noyau_ouverture = 2 * FACTEUR_ECHELLE + 1
 kernel_ouverture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (taille_noyau_ouverture, taille_noyau_ouverture))
 kernel_fermeture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
 for i in range(NB_COULEURS):
     couleur_b, couleur_g, couleur_r = couleurs[i]
 
-    # Ignorer le fond blanc / quasi-blanc
-    if couleur_r > 245 and couleur_g > 245 and couleur_b > 245:
-        continue
-
     masque_brut = np.uint8((labels_matrice == i) & (alpha > 0)) * 255
 
-    # 1. Élimination des lignes et contours fins
+    # Nettoyage morphologique
     masque_sans_lignes = cv2.morphologyEx(masque_brut, cv2.MORPH_OPEN, kernel_ouverture)
-
-    # 2. Nettoyage des bords et comblement des petits trous dans les formes pleines
     masque_propre = cv2.morphologyEx(masque_sans_lignes, cv2.MORPH_CLOSE, kernel_fermeture)
 
-    # 3. Filtrage par taille de composants connexes (supprime les ilôts isolés)
+    # Filtrage par taille de composants
     nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_propre)
     masque_final = np.zeros_like(masque_propre)
 
