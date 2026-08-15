@@ -72,7 +72,7 @@ if image_brute is None:
 h_orig, w_orig = image_brute.shape[:2]
 dimension_max = max(h_orig, w_orig)
 
-# Calcul du facteur d'échelle dynamique pour accélérer le traitement
+# Calcul du facteur d'échelle dynamique pour optimiser le temps de calcul
 if dimension_max < 500:
     FACTEUR_ECHELLE = 4
 elif dimension_max < 1200:
@@ -81,8 +81,8 @@ else:
     FACTEUR_ECHELLE = 1
 
 # Ajustement automatique des seuils d'anti-bruit
-TAILLE_GRAIN_MIN = 80 * (FACTEUR_ECHELLE ** 2)      # Taille minimale d'un élément (px²)
-SURFACE_CALQUE_MIN = 300 * (FACTEUR_ECHELLE ** 2)  # Surface minimale d'un calque (px²)
+TAILLE_GRAIN_MIN = 80 * (FACTEUR_ECHELLE ** 2)      # Taille minimale d'un élément standard (px²)
+SURFACE_CALQUE_MIN = 300 * (FACTEUR_ECHELLE ** 2)   # Surface minimale globale d'un calque (px²)
 PADDING = 50 * FACTEUR_ECHELLE                      # Marge de sécurité (px)
 
 # Séparation des canaux BGR et Alpha (transparence)
@@ -161,8 +161,21 @@ labels_tous = kmeans.predict(pixels_tous)
 labels_matrice = labels_tous.reshape(hauteur, largeur)
 
 # =========================================================
-# 6. FILTRAGE MORPHOLOGIQUE DES CALQUES PNG
+# 6. FILTRAGE INTELLIGENT : TAILLE + NETTETÉ DES CONTOURS
 # =========================================================
+def calculer_carte_nettete(image_bgr):
+    """
+    Calcule l'intensité des contours de l'image avec l'opérateur de Sobel.
+    Plus les bords sont nets, plus la valeur du gradient est élevée.
+    """
+    gris = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    sobelx = cv2.Sobel(gris, cv2.CV_64F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gris, cv2.CV_64F, 0, 1, ksize=3)
+    return cv2.magnitude(sobelx, sobely)
+
+carte_nettete = calculer_carte_nettete(img_bgr)
+SEUIL_NETTETE_MIN = 40  # Seuil de netteté minimale pour conserver un petit détail
+
 taille_noyau_ouverture = 2 * FACTEUR_ECHELLE + 1
 kernel_ouverture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (taille_noyau_ouverture, taille_noyau_ouverture))
 kernel_fermeture = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -177,13 +190,29 @@ for i in range(NB_COULEURS_CLIENT):
     masque_sans_lignes = cv2.morphologyEx(masque_brut, cv2.MORPH_OPEN, kernel_ouverture)
     masque_propre = cv2.morphologyEx(masque_sans_lignes, cv2.MORPH_CLOSE, kernel_fermeture)
 
-    # Filtrage des petites imperfections
+    # Analyse des composants connexes
     nb_labels, labels_obj, stats, _ = cv2.connectedComponentsWithStats(masque_propre)
     masque_final = np.zeros_like(masque_propre)
 
     for obj_i in range(1, nb_labels):
-        if stats[obj_i, cv2.CC_STAT_AREA] >= TAILLE_GRAIN_MIN:
+        surface = stats[obj_i, cv2.CC_STAT_AREA]
+        
+        # 1. Si l'élément est grand, on le conserve d'office
+        if surface >= TAILLE_GRAIN_MIN:
             masque_final[labels_obj == obj_i] = 255
+        # 2. Si l'élément est petit, on conserve uniquement s'il est très NET (bords francs)
+        elif surface >= (TAILLE_GRAIN_MIN / 4):
+            masque_objet = np.uint8(labels_obj == obj_i) * 255
+            contours, _ = cv2.findContours(masque_objet, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if contours:
+                masque_bordure = np.zeros_like(masque_objet)
+                cv2.drawContours(masque_bordure, contours, -1, 255, 1)
+                
+                nettete_moyenne = cv2.mean(carte_nettete, mask=masque_bordure)[0]
+                
+                if nettete_moyenne >= SEUIL_NETTETE_MIN:
+                    masque_final[labels_obj == obj_i] = 255
 
     surface_reelle = np.count_nonzero(masque_final)
 
@@ -237,7 +266,7 @@ def masque_vers_path_svg_hd(masque_binaire):
         return " ".join(correspondances) if correspondances else None
 
     finally:
-        # Supprime toujours les fichiers temporaires après utilisation
+        # Nettoyage systématique des fichiers temporaires
         if os.path.exists(chemin_pbm): os.remove(chemin_pbm)
         if os.path.exists(chemin_svg): os.remove(chemin_svg)
 
@@ -267,5 +296,5 @@ with open(chemin_sortie_svg, "w", encoding="utf-8") as f:
 # Libération explicite de la mémoire
 gc.collect()
 
-# Seule cette ligne est imprimée sur stdout pour que PHP la récupère
+# Seule cette ligne est imprimée pour la récupération par PHP
 print(chemin_sortie_svg)
